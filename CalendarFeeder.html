@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Calendar Paste (Google + Outlook)</title>
+
+  <!-- chrono-node (natural language date/time parser) -->
+  <script src="https://unpkg.com/chrono-node@2.7.6/dist/chrono.min.js"></script>
+
+  <!-- Microsoft MSAL (browser) -->
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.20.0/lib/msal-browser.min.js"></script>
+
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+    .wrap { max-width: 980px; margin: 0 auto; }
+    h1 { margin: 0 0 6px; }
+    .sub { margin: 0 0 18px; color: #555; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin: 12px 0; }
+    textarea { width: 100%; height: 220px; padding: 12px; border-radius: 12px; border: 1px solid #ddd; font-size: 14px; }
+    input { padding: 10px; border-radius: 10px; border: 1px solid #ddd; min-width: 240px; }
+    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    pre { background: #fafafa; border: 1px solid #eee; border-radius: 12px; padding: 12px; overflow: auto; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; border: 1px solid #ddd; font-size: 12px; }
+    .ok { color: #0a6; border-color: #9dd; background: #f3fffb; }
+    .no { color: #a40; border-color: #f1c3a8; background: #fff8f3; }
+    .muted { color: #666; }
+    .small { font-size: 12px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 840px) { .grid2 { grid-template-columns: 1fr; } input { min-width: 0; width: 100%; } }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <h1>Calendar Paste</h1>
+    <p class="sub">Paste text → preview → create in Google Calendar and Outlook (Microsoft 365). Also supports .ics download for iPhone import.</p>
+
+    <div class="card">
+      <h3 style="margin-top:0">1) App configuration</h3>
+      <div class="grid2">
+        <div>
+          <label><b>Google OAuth Client ID</b></label><br />
+          <input id="googleClientId" placeholder="xxxxx.apps.googleusercontent.com" />
+          <div class="small muted" style="margin-top:6px">
+            Needs Google Calendar scope: <code>https://www.googleapis.com/auth/calendar.events</code>
+          </div>
+        </div>
+        <div>
+          <label><b>Microsoft Azure App Client ID</b></label><br />
+          <input id="msClientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+          <div class="small muted" style="margin-top:6px">
+            Needs Microsoft Graph scope: <code>Calendars.ReadWrite</code>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <label><b>Time zone</b></label>
+        <input id="timeZone" value="Europe/Berlin" />
+        <span class="small muted">Used for display + event creation.</span>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <button id="btnInit">Initialize OAuth</button>
+        <span id="statusGoogle" class="badge no">Google: not connected</span>
+        <span id="statusMS" class="badge no">Outlook: not connected</span>
+      </div>
+
+      <div class="small muted" style="margin-top:10px">
+        Tip: Host this on <code>http://localhost:xxxx</code> or HTTPS. OAuth generally won’t work from <code>file://</code>.
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">2) Paste</h3>
+      <textarea id="paste" placeholder="Example:
+Team sync with Alex
+Next Tue 14:30-15:00
+Room Atlas, Berlin Office
+Discuss Q1 roadmap"></textarea>
+
+      <div class="row" style="margin-top:12px">
+        <button id="btnPreview">Preview parse</button>
+        <button id="btnConnectGoogle" disabled>Connect Google</button>
+        <button id="btnConnectMS" disabled>Connect Outlook</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">3) Preview</h3>
+      <pre id="preview">{}</pre>
+
+      <div class="row" style="margin-top:12px">
+        <button id="btnCreateGoogle" disabled>Create in Google Calendar</button>
+        <button id="btnCreateMS" disabled>Create in Outlook Calendar</button>
+        <button id="btnCreateBoth" disabled>Create in both</button>
+        <button id="btnDownloadIcs" disabled>Download .ics (iPhone import)</button>
+      </div>
+
+      <div class="small muted" style="margin-top:10px">
+        If you only need the event to show on iPhone: creating it in Google/Outlook is enough if those accounts are added in iOS Calendar.
+        Otherwise, use the .ics fallback (or add iCloud CalDAV with a backend).
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">4) Results</h3>
+      <pre id="results">{}</pre>
+      <div class="small muted">This app does best-effort. You can create in one calendar even if the other fails.</div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ----------------------------
+  // Utilities
+  // ----------------------------
+  const $ = (id) => document.getElementById(id);
+  const logResult = (obj) => { $("results").textContent = JSON.stringify(obj, null, 2); };
+  const logPreview = (obj) => { $("preview").textContent = JSON.stringify(obj, null, 2); };
+
+  const state = {
+    parsedEvent: null,
+    google: { accessToken: null, tokenClient: null },
+    ms: { msal: null, account: null, accessToken: null },
+    ready: false
+  };
+
+  function setBadge(el, ok, text) {
+    el.classList.remove("ok", "no");
+    el.classList.add(ok ? "ok" : "no");
+    el.textContent = text;
+  }
+
+  function nowLocalISO() {
+    return new Date().toISOString();
+  }
+
+  function addMinutes(date, minutes) {
+    return new Date(date.getTime() + minutes * 60000);
+  }
+
+  function guessLocation(lines) {
+    const locLine =
+      lines.find(l => /^at\s+/i.test(l)) ||
+      lines.find(l => /\b(room|office|zoom|teams|meet|building)\b/i.test(l));
+    if (!locLine) return null;
+    return locLine.replace(/^at\s+/i, "").trim();
+  }
+
+  function parseDurationMinutes(text) {
+    // Looks for "90 min", "1h", "1.5h", "2 hours"
+    const t = text.toLowerCase();
+    const m1 = t.match(/(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b/);
+    if (m1) return Math.round(parseFloat(m1[1]) * 60);
+    const m2 = t.match(/(\d+)\s*(m|min|mins|minute|minutes)\b/);
+    if (m2) return parseInt(m2[1], 10);
+    return null;
+  }
+
+  function parsePaste(rawText, timeZone) {
+    const raw = (rawText || "").trim();
+    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+    const title = lines[0] || "Untitled event";
+    const location = guessLocation(lines.slice(1));
+    const notes = lines.slice(1).join("\n") || "";
+
+    // chrono parses date/time; end may be missing
+    const results = chrono.parse(raw, new Date(), { forwardDate: true });
+    const first = results[0];
+
+    let startDate = first?.start?.date?.() || new Date();
+    let endDate = first?.end?.date?.();
+
+    if (!endDate) {
+      // If user pasted "14:30-15:00" chrono sometimes provides end;
+      // otherwise use duration hint or default 60 minutes.
+      const dur = parseDurationMinutes(raw);
+      endDate = addMinutes(startDate, dur || 60);
+    }
+
+    return {
+      title,
+      location,
+      notes,
+      // store as ISO with timezone context for APIs
+      startISO: startDate.toISOString(),
+      endISO: endDate.toISOString(),
+      timeZone: timeZone || "Europe/Berlin",
+      sourceText: raw
+    };
+  }
+
+  function toICS(ev) {
+    // Simple VEVENT; many clients accept UTC times.
+    const escapeICS = (s) => (s || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/\n/g, "\\n")
+      .replace(/,/g, "\\,")
+      .replace(/;/g, "\\;");
+
+    const dt = (iso) => iso.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    const uid = (crypto?.randomUUID?.() || (Math.random().toString(16).slice(2) + Date.now()));
+
+    const lines = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//calendar-paste//EN",
+      "CALSCALE:GREGORIAN",
+      "BEGIN:VEVENT",
+      `UID:${uid}`,
+      `DTSTAMP:${dt(nowLocalISO())}`,
+      `DTSTART:${dt(ev.startISO)}`,
+      `DTEND:${dt(ev.endISO)}`,
+      `SUMMARY:${escapeICS(ev.title)}`,
+      ev.location ? `LOCATION:${escapeICS(ev.location)}` : "",
+      ev.notes ? `DESCRIPTION:${escapeICS(ev.notes)}` : "",
+      "END:VEVENT",
+      "END:VCALENDAR"
+    ].filter(Boolean);
+
+    return lines.join("\r\n");
+  }
+
+  function download(filename, text) {
+    const blob = new Blob([text], { type: "text/calendar;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // ----------------------------
+  // OAuth init
+  // ----------------------------
+  function initGoogle() {
+    const clientId = $("googleClientId").value.trim();
+    if (!clientId) throw new Error("Missing Google Client ID.");
+
+    if (!window.google || !google.accounts || !google.accounts.oauth2) {
+      throw new Error("Google Identity Services not loaded yet. Try again in a second.");
+    }
+
+    state.google.tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: "https://www.googleapis.com/auth/calendar.events",
+      callback: (resp) => {
+        if (resp.error) {
+          setBadge($("statusGoogle"), false, "Google: auth failed");
+          logResult({ googleAuthError: resp });
+          return;
+        }
+        state.google.accessToken = resp.access_token;
+        setBadge($("statusGoogle"), true, "Google: connected");
+        updateActionButtons();
+      }
+    });
+  }
+
+  function initMicrosoft() {
+    const clientId = $("msClientId").value.trim();
+    if (!clientId) throw new Error("Missing Microsoft Client ID.");
+
+    const msalConfig = {
+      auth: {
+        clientId,
+        authority: "https://login.microsoftonline.com/common",
+        redirectUri: window.location.origin + window.location.pathname
+      },
+      cache: {
+        cacheLocation: "localStorage",
+        storeAuthStateInCookie: false
+      }
+    };
+
+    state.ms.msal = new msal.PublicClientApplication(msalConfig);
+
+    // Handle redirect flow if it happened
+    return state.ms.msal.handleRedirectPromise().then((result) => {
+      if (result && result.account) {
+        state.ms.account = result.account;
+        setBadge($("statusMS"), true, "Outlook: connected");
+        updateActionButtons();
+      } else {
+        const accounts = state.ms.msal.getAllAccounts();
+        if (accounts.length > 0) {
+          state.ms.account = accounts[0];
+          setBadge($("statusMS"), true, "Outlook: connected");
+        }
+      }
+    });
+  }
+
+  async function initializeOAuth() {
+    try {
+      initGoogle();
+      await initMicrosoft();
+      state.ready = true;
+
+      $("btnConnectGoogle").disabled = false;
+      $("btnConnectMS").disabled = false;
+
+      logResult({ ok: true, message: "OAuth initialized. You can connect Google and/or Outlook now." });
+    } catch (e) {
+      logResult({ ok: false, error: String(e?.message || e) });
+    }
+  }
+
+  // ----------------------------
+  // Connect actions
+  // ----------------------------
+  function connectGoogle() {
+    if (!state.google.tokenClient) return logResult({ ok: false, error: "Google not initialized." });
+    state.google.tokenClient.requestAccessToken({ prompt: "consent" });
+  }
+
+  async function connectMicrosoft() {
+    if (!state.ms.msal) return logResult({ ok: false, error: "Microsoft not initialized." });
+
+    const request = {
+      scopes: ["openid", "profile", "offline_access", "Calendars.ReadWrite"],
+      prompt: "select_account"
+    };
+
+    // redirect login is most reliable across browsers
+    await state.ms.msal.loginRedirect(request);
+  }
+
+  // ----------------------------
+  // Calendar API calls
+  // ----------------------------
+  async function createGoogleEvent(ev) {
+    if (!state.google.accessToken) throw new Error("Google not connected.");
+
+    const body = {
+      summary: ev.title,
+      location: ev.location || undefined,
+      description: ev.notes || undefined,
+      start: { dateTime: ev.startISO, timeZone: ev.timeZone },
+      end: { dateTime: ev.endISO, timeZone: ev.timeZone }
+    };
+
+    const resp = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${state.google.accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`Google API error: ${resp.status} ${JSON.stringify(data)}`);
+    return data;
+  }
+
+  async function getMicrosoftAccessToken() {
+    if (!state.ms.msal) throw new Error("Microsoft not initialized.");
+    if (!state.ms.account) {
+      const accounts = state.ms.msal.getAllAccounts();
+      if (accounts.length === 0) throw new Error("Outlook not connected.");
+      state.ms.account = accounts[0];
+    }
+
+    const request = {
+      account: state.ms.account,
+      scopes: ["Calendars.ReadWrite"]
+    };
+
+    try {
+      const tokenResp = await state.ms.msal.acquireTokenSilent(request);
+      return tokenResp.accessToken;
+    } catch {
+      // fall back to redirect
+      await state.ms.msal.acquireTokenRedirect(request);
+      throw new Error("Redirecting to Microsoft to get token...");
+    }
+  }
+
+  async function createMicrosoftEvent(ev) {
+    const accessToken = await getMicrosoftAccessToken();
+
+    const body = {
+      subject: ev.title,
+      body: { contentType: "text", content: ev.notes || "" },
+      start: { dateTime: ev.startISO, timeZone: ev.timeZone },
+      end: { dateTime: ev.endISO, timeZone: ev.timeZone },
+      location: ev.location ? { displayName: ev.location } : undefined
+    };
+
+    const resp = await fetch("https://graph.microsoft.com/v1.0/me/events", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`Microsoft Graph error: ${resp.status} ${JSON.stringify(data)}`);
+    return data;
+  }
+
+  // ----------------------------
+  // UI wiring
+  // ----------------------------
+  function updateActionButtons() {
+    const hasPreview = !!state.parsedEvent;
+
+    $("btnCreateGoogle").disabled = !(hasPreview && !!state.google.accessToken);
+    $("btnCreateMS").disabled = !(hasPreview && !!state.ms.account);
+    $("btnCreateBoth").disabled = !(hasPreview && (!!state.google.accessToken || !!state.ms.account));
+    $("btnDownloadIcs").disabled = !hasPreview;
+  }
+
+  $("btnInit").addEventListener("click", initializeOAuth);
+
+  $("btnPreview").addEventListener("click", () => {
+    const tz = $("timeZone").value.trim() || "Europe/Berlin";
+    const text = $("paste").value;
+    const ev = parsePaste(text, tz);
+    state.parsedEvent = ev;
+    logPreview(ev);
+    logResult({ ok: true, message: "Preview generated." });
+    updateActionButtons();
+  });
+
+  $("btnConnectGoogle").addEventListener("click", () => {
+    try { connectGoogle(); }
+    catch (e) { logResult({ ok: false, error: String(e?.message || e) }); }
+  });
+
+  $("btnConnectMS").addEventListener("click", () => {
+    connectMicrosoft().catch(e => logResult({ ok: false, error: String(e?.message || e) }));
+  });
+
+  $("btnCreateGoogle").addEventListener("click", async () => {
+    try {
+      const data = await createGoogleEvent(state.parsedEvent);
+      logResult({ google: { ok: true, data } });
+    } catch (e) {
+      logResult({ google: { ok: false, error: String(e?.message || e) } });
+    }
+  });
+
+  $("btnCreateMS").addEventListener("click", async () => {
+    try {
+      const data = await createMicrosoftEvent(state.parsedEvent);
+      logResult({ microsoft: { ok: true, data } });
+    } catch (e) {
+      logResult({ microsoft: { ok: false, error: String(e?.message || e) } });
+    }
+  });
+
+  $("btnCreateBoth").addEventListener("click", async () => {
+    const out = { event: state.parsedEvent, google: null, microsoft: null };
+    await Promise.all([
+      (async () => {
+        if (!state.google.accessToken) return;
+        try { out.google = { ok: true, data: await createGoogleEvent(state.parsedEvent) }; }
+        catch (e) { out.google = { ok: false, error: String(e?.message || e) }; }
+      })(),
+      (async () => {
+        if (!state.ms.account) return;
+        try { out.microsoft = { ok: true, data: await createMicrosoftEvent(state.parsedEvent) }; }
+        catch (e) { out.microsoft = { ok: false, error: String(e?.message || e) }; }
+      })()
+    ]);
+    logResult(out);
+  });
+
+  $("btnDownloadIcs").addEventListener("click", () => {
+    const ev = state.parsedEvent;
+    const ics = toICS(ev);
+    const safeTitle = (ev.title || "event").replace(/[^\w\-]+/g, "_").slice(0, 40);
+    download(`${safeTitle}.ics`, ics);
+    logResult({ ok: true, message: "Downloaded .ics file." });
+  });
+
+  // Initial badge states
+  setBadge($("statusGoogle"), false, "Google: not connected");
+  setBadge($("statusMS"), false, "Outlook: not connected");
+
+  // Make buttons safe by default until init
+  $("btnConnectGoogle").disabled = true;
+  $("btnConnectMS").disabled = true;
+  updateActionButtons();
+})();
+</script>
+</body>
+</html>
