@@ -1,1 +1,398 @@
+import { useState, useRef, useEffect, useCallback } from “react”;
 
+const TODAY = new Date().toISOString().split(“T”)[0];
+
+const SYSTEM_PROMPT = `You are a precise calendar event extractor. Your job is to read ANY kind of natural language text — emails, WhatsApp messages, event listings, social media posts, newsletters, invites, tickets, flyers, or casual conversation — and extract structured calendar event details.
+
+Rules:
+
+- TODAY’s date is ${TODAY}. Use this to resolve relative dates (“tomorrow”, “next Friday”, “in 3 days”).
+- If the year is ambiguous, pick the soonest upcoming occurrence.
+- Times should be in 24-hour HH:MM format. Convert “6pm” → “18:00”, “noon” → “12:00”, “midnight” → “00:00”.
+- If only one time is given and it seems like a start time, leave endTime blank.
+- If a duration is mentioned (“2 hours”), calculate endTime from startTime.
+- For recurring events (e.g. “every Tuesday”), extract just the next occurrence date.
+- Extract the FULL location including street address if present.
+- For notes: include any URL, ticket link, dress code, RSVP info, or extra context found in the text.
+- Return ONLY a raw JSON object. No markdown. No explanation. No code fences.
+
+JSON schema:
+{
+“title”: “string — concise event name”,
+“date”: “YYYY-MM-DD or empty string”,
+“startTime”: “HH:MM or empty string”,
+“endTime”: “HH:MM or empty string”,
+“location”: “string or empty string”,
+“notes”: “string or empty string”
+}`;
+
+async function extractEvent(text, signal) {
+const res = await fetch(“https://api.anthropic.com/v1/messages”, {
+method: “POST”,
+signal,
+headers: { “Content-Type”: “application/json” },
+body: JSON.stringify({
+model: “claude-sonnet-4-20250514”,
+max_tokens: 800,
+system: SYSTEM_PROMPT,
+messages: [{ role: “user”, content: `Extract calendar event from this text:\n\n${text}` }],
+}),
+});
+if (!res.ok) throw new Error(`API ${res.status}`);
+const data = await res.json();
+const raw = data.content.map((b) => b.text || “”).join(””).trim();
+return JSON.parse(raw);
+}
+
+function formatDateDisplay(dateStr) {
+if (!dateStr) return “”;
+const [y, m, d] = dateStr.split(”-”);
+return new Date(y, m - 1, d).toLocaleDateString(“en-GB”, {
+weekday: “short”, day: “numeric”, month: “long”, year: “numeric”,
+});
+}
+
+function formatTimeDisplay(t) {
+if (!t) return “”;
+const [h, m] = t.split(”:”).map(Number);
+const ampm = h >= 12 ? “PM” : “AM”;
+return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${ampm}`;
+}
+
+function ToggleSwitch({ checked, onChange, label, sub }) {
+return (
+<label style={{ display: “flex”, alignItems: “center”, justifyContent: “space-between”, padding: “13px 18px”, background: “#f7f4ef”, borderRadius: 12, cursor: “pointer”, border: “1.5px solid #ece8e0”, userSelect: “none” }}>
+<div>
+<div style={{ fontSize: 14, fontWeight: 500, color: “#1a1612” }}>{label}</div>
+<div style={{ fontSize: 12, color: “#9a9490”, marginTop: 2 }}>{sub}</div>
+</div>
+<div
+onClick={(e) => { e.preventDefault(); onChange(!checked); }}
+style={{ width: 46, height: 26, borderRadius: 999, position: “relative”, flexShrink: 0, background: checked ? “#d4760a” : “#d6d0c8”, transition: “background 0.2s”, cursor: “pointer” }}
+>
+<div style={{ position: “absolute”, width: 20, height: 20, borderRadius: “50%”, background: “#fff”, top: 3, left: checked ? 23 : 3, transition: “left 0.2s”, boxShadow: “0 1px 4px rgba(0,0,0,0.2)” }} />
+</div>
+</label>
+);
+}
+
+function FieldRow({ icon, label, value, onChange, type = “text”, placeholder = “”, loading }) {
+const hasValue = value && value.trim();
+const taRef = useRef(null);
+
+useEffect(() => {
+if (taRef.current && type === “textarea”) {
+taRef.current.style.height = “auto”;
+taRef.current.style.height = taRef.current.scrollHeight + “px”;
+}
+}, [value, type]);
+
+const inputStyle = {
+background: “transparent”, border: “none”, outline: “none”,
+fontFamily: “‘DM Mono’, monospace”, fontSize: 14, color: “#1a1612”,
+width: “100%”, padding: “5px 8px”, margin: “-5px -8px”,
+borderRadius: 6, transition: “background 0.15s”, lineHeight: 1.6,
+};
+
+return (
+<div style={{ display: “grid”, gridTemplateColumns: “38px 1fr 14px”, gap: 12, alignItems: “start”, padding: “14px 18px”, borderBottom: “1.5px solid #ece8e0” }}>
+<div style={{ width: 34, height: 34, background: loading ? “#f0ece4” : “#ece8e0”, borderRadius: 10, display: “flex”, alignItems: “center”, justifyContent: “center”, fontSize: 15, flexShrink: 0, marginTop: 1, transition: “background 0.3s” }}>
+{icon}
+</div>
+<div style={{ minWidth: 0 }}>
+<div style={{ fontSize: 10, letterSpacing: “0.1em”, textTransform: “uppercase”, color: “#b0aa9e”, marginBottom: 4 }}>{label}</div>
+{loading ? (
+<div style={{ height: 18, background: “linear-gradient(90deg, #ece8e0 25%, #f7f4ef 50%, #ece8e0 75%)”, backgroundSize: “200% 100%”, borderRadius: 4, animation: “shimmer 1.4s infinite”, width: “65%” }} />
+) : type === “textarea” ? (
+<textarea ref={taRef} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={2}
+style={{ …inputStyle, resize: “none”, overflow: “hidden” }}
+onFocus={(e) => (e.target.style.background = “#f0ece4”)}
+onBlur={(e) => (e.target.style.background = “transparent”)} />
+) : (
+<input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+style={{ …inputStyle, height: 28 }}
+onFocus={(e) => (e.target.style.background = “#f0ece4”)}
+onBlur={(e) => (e.target.style.background = “transparent”)} />
+)}
+</div>
+<div style={{
+width: 8, height: 8, borderRadius: “50%”, marginTop: 16, flexShrink: 0,
+background: loading ? “#f0c060” : hasValue ? “#4caf4c” : “#d6d0c8”,
+boxShadow: loading ? “0 0 6px rgba(240,192,96,0.6)” : hasValue ? “0 0 6px rgba(76,175,76,0.5)” : “none”,
+transition: “all 0.3s”,
+animation: loading ? “pulse 1s ease-in-out infinite” : “none”,
+}} />
+</div>
+);
+}
+
+const EMPTY_FIELDS = { title: “”, date: “”, startTime: “”, endTime: “”, location: “”, notes: “” };
+
+const EXAMPLES = [
+“Hey! Don’t forget the team lunch tomorrow at 12:30pm at The Ivy, 1-5 West Street. Should be done by 2ish.”,
+“RSVP by Friday: AI & Future of Work panel, March 15th 6–8pm, Barbican Centre, Silk Street EC2Y 8DS. Free entry, register at eventbrite.com/ai-panel”,
+“Reminder: dentist appt next Tuesday at 3:45pm, Dr. Patel, 42 Harley St W1G 9PW. Bring insurance card.”,
+];
+
+export default function CalendarDrop() {
+const [rawText, setRawText] = useState(””);
+const [fields, setFields] = useState(EMPTY_FIELDS);
+const [status, setStatus] = useState(“idle”); // idle | waiting | loading | done | error
+const [error, setError] = useState(””);
+const [isPrivate, setIsPrivate] = useState(false);
+const [travelBuffer, setTravelBuffer] = useState(false);
+
+const debounceRef = useRef(null);
+const abortRef = useRef(null);
+const setField = (k) => (v) => setFields((f) => ({ …f, [k]: v }));
+
+const runParse = useCallback(async (text) => {
+if (abortRef.current) abortRef.current.abort();
+abortRef.current = new AbortController();
+setStatus(“loading”);
+setError(””);
+try {
+const data = await extractEvent(text, abortRef.current.signal);
+setFields({
+title: data.title || “”,
+date: data.date || “”,
+startTime: data.startTime || “”,
+endTime: data.endTime || “”,
+location: data.location || “”,
+notes: data.notes || “”,
+});
+setStatus(“done”);
+} catch (e) {
+if (e.name === “AbortError”) return;
+setError(“Couldn’t extract event details — make sure the text contains event info.”);
+setStatus(“error”);
+}
+}, []);
+
+const handleTextChange = (text) => {
+setRawText(text);
+if (debounceRef.current) clearTimeout(debounceRef.current);
+if (abortRef.current) abortRef.current.abort();
+
+```
+if (!text.trim()) {
+  setStatus("idle");
+  setFields(EMPTY_FIELDS);
+  setError("");
+  return;
+}
+
+setStatus("waiting");
+setFields(EMPTY_FIELDS);
+debounceRef.current = setTimeout(() => runParse(text), 900);
+```
+
+};
+
+const handleExampleClick = (text) => {
+if (debounceRef.current) clearTimeout(debounceRef.current);
+setRawText(text);
+setFields(EMPTY_FIELDS);
+setError(””);
+runParse(text);
+};
+
+const clear = () => {
+if (debounceRef.current) clearTimeout(debounceRef.current);
+if (abortRef.current) abortRef.current.abort();
+setRawText(””); setFields(EMPTY_FIELDS); setStatus(“idle”); setError(””);
+};
+
+const getExportStart = () => {
+if (!travelBuffer || !fields.startTime) return fields.startTime;
+const [h, m] = fields.startTime.split(”:”).map(Number);
+const total = h * 60 + m - 30;
+return `${String(Math.floor(Math.max(0, total) / 60)).padStart(2, "0")}:${String(((total % 60) + 60) % 60).padStart(2, "0")}`;
+};
+
+const downloadICS = () => {
+const { title, date, endTime, location, notes } = fields;
+if (!title || !date) { setError(“Title and date are required.”); return; }
+const ds = date.replace(/-/g, “”);
+const st = getExportStart();
+const startStr = st ? `${ds}T${st.replace(":", "")}00` : ds;
+const endStr = endTime ? `${ds}T${endTime.replace(":", "")}00` : startStr;
+const ics = [
+“BEGIN:VCALENDAR”, “VERSION:2.0”, “PRODID:-//CalendarDrop//EN”,
+“BEGIN:VEVENT”,
+`UID:${Date.now()}@calendardrop`,
+`DTSTAMP:${new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15)}Z`,
+st ? `DTSTART:${startStr}` : `DTSTART;VALUE=DATE:${ds}`,
+endTime ? `DTEND:${endStr}` : `DTEND;VALUE=DATE:${ds}`,
+`SUMMARY:${title}`,
+location ? `LOCATION:${location}` : “”,
+notes ? `DESCRIPTION:${notes.replace(/\n/g, "\\n")}` : “”,
+isPrivate ? “CLASS:PRIVATE” : “CLASS:PUBLIC”,
+“END:VEVENT”, “END:VCALENDAR”,
+].filter(Boolean).join(”\r\n”);
+const a = Object.assign(document.createElement(“a”), {
+href: URL.createObjectURL(new Blob([ics], { type: “text/calendar” })),
+download: `${title.slice(0, 40).replace(/[^a-z0-9]/gi, "_")}.ics`,
+});
+a.click();
+};
+
+const addToGoogle = () => {
+const { title, date, endTime, location, notes } = fields;
+if (!title || !date) { setError(“Title and date are required.”); return; }
+const ds = date.replace(/-/g, “”);
+const st = getExportStart();
+const start = st ? `${ds}T${st.replace(":", "")}00` : ds;
+const end = endTime ? `${ds}T${endTime.replace(":", "")}00` : ds;
+const p = new URLSearchParams({ text: title, dates: `${start}/${end}`, …(location && { location }), …(notes && { details: notes }) });
+window.open(`https://calendar.google.com/calendar/render?action=TEMPLATE&${p}`, “_blank”);
+};
+
+const isLoading = status === “loading” || status === “waiting”;
+const showResults = status === “loading” || status === “done” || status === “error”;
+
+const statusLabel = { waiting: “Reading…”, loading: “Extracting details…”, done: “✓ Done — click any field to edit”, error: “” }[status] || “”;
+
+return (
+<div style={{ fontFamily: “‘DM Mono’, monospace”, background: “#f3efe8”, minHeight: “100vh”, padding: “0 16px 80px” }}>
+<style>{`@import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Mono:ital,wght@0,300;0,400;1,300&display=swap'); * { box-sizing: border-box; } textarea, input { font-family: 'DM Mono', monospace !important; } ::-webkit-scrollbar { display: none; } @keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } } @keyframes spin { to { transform: rotate(360deg); } } @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} } @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} } .fade-up { animation: fadeUp 0.35s ease forwards; } .example-chip:hover { background: #e0d8cc !important; }`}</style>
+
+```
+  <div style={{ maxWidth: 600, margin: "0 auto" }}>
+    {/* Header */}
+    <div style={{ padding: "44px 0 28px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+        <div style={{ width: 46, height: 46, background: "#d4760a", borderRadius: 13, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>📅</div>
+        <div>
+          <div style={{ fontFamily: "Syne, sans-serif", fontWeight: 800, fontSize: 26, color: "#1a1612", letterSpacing: "-0.5px" }}>
+            Calendar<span style={{ color: "#d4760a" }}>Drop</span>
+          </div>
+          <div style={{ fontSize: 12, color: "#9a9490", letterSpacing: "0.04em" }}>Paste anything · AI extracts everything instantly</div>
+        </div>
+      </div>
+    </div>
+
+    {/* Input card */}
+    <div style={{
+      background: "#fff", borderRadius: 16, padding: 20, marginBottom: 12,
+      border: `1.5px solid ${isLoading ? "#f0c060" : status === "done" ? "#b0e0b0" : "#ece8e0"}`,
+      transition: "border-color 0.4s",
+    }}>
+      <div style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#b0aa9e", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{
+            width: 6, height: 6, borderRadius: "50%", display: "inline-block", transition: "background 0.3s",
+            background: isLoading ? "#f0c060" : status === "done" ? "#4caf4c" : "#d4760a",
+            animation: isLoading ? "pulse 1s ease-in-out infinite" : "none",
+          }} />
+          Paste your event details
+        </span>
+        {statusLabel && (
+          <span style={{ fontSize: 11, color: status === "done" ? "#4caf4c" : "#b0aa9e", display: "flex", alignItems: "center", gap: 5, transition: "color 0.3s" }}>
+            {isLoading && <div style={{ width: 10, height: 10, border: "1.5px solid #d6d0c8", borderTopColor: "#d4760a", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />}
+            {statusLabel}
+          </span>
+        )}
+      </div>
+
+      <textarea
+        value={rawText}
+        onChange={(e) => handleTextChange(e.target.value)}
+        placeholder={"Paste anything with event info — an email, WhatsApp message, invite, ticket, or just describe it in plain language.\n\nAI will extract the details automatically as you type."}
+        style={{ width: "100%", minHeight: 130, background: "transparent", border: "none", outline: "none", fontSize: 14, color: "#1a1612", lineHeight: 1.7, resize: "none", caretColor: "#d4760a" }}
+      />
+
+      {rawText && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8, paddingTop: 8, borderTop: "1.5px solid #ece8e0" }}>
+          <button onClick={clear} style={{ background: "none", border: "none", color: "#b0aa9e", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>✕ Clear</button>
+        </div>
+      )}
+    </div>
+
+    {/* Example chips */}
+    {status === "idle" && (
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 11, color: "#b0aa9e", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 8 }}>Try an example</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {EXAMPLES.map((ex, i) => (
+            <button key={i} className="example-chip" onClick={() => handleExampleClick(ex)}
+              style={{ background: "#ece8e0", border: "none", borderRadius: 10, padding: "10px 14px", textAlign: "left", cursor: "pointer", fontSize: 12, color: "#5a5550", fontFamily: "'DM Mono', monospace", lineHeight: 1.5, transition: "background 0.15s" }}>
+              "{ex.length > 90 ? ex.slice(0, 90) + "…" : ex}"
+            </button>
+          ))}
+        </div>
+      </div>
+    )}
+
+    {/* Results panel */}
+    {showResults && (
+      <div className="fade-up">
+        <div style={{ background: "#fff", border: "1.5px solid #ece8e0", borderRadius: 16, overflow: "hidden", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", background: "#f7f4ef", borderBottom: "1.5px solid #ece8e0" }}>
+            <div style={{ fontFamily: "Syne, sans-serif", fontWeight: 700, fontSize: 14, color: "#1a1612", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: "#d4760a" }}>✦</span> Detected Details
+            </div>
+            {status === "done" && <div style={{ fontSize: 11, color: "#b0aa9e" }}>Click any field to edit</div>}
+          </div>
+
+          {status === "done" && (fields.date || fields.startTime) && (
+            <div style={{ padding: "11px 18px", background: "#fffbf5", borderBottom: "1.5px solid #ece8e0", fontSize: 13, color: "#7a6a4a" }}>
+              {fields.date && <span>{formatDateDisplay(fields.date)}</span>}
+              {fields.startTime && <span> · {formatTimeDisplay(fields.startTime)}{fields.endTime ? ` – ${formatTimeDisplay(fields.endTime)}` : ""}</span>}
+            </div>
+          )}
+
+          <FieldRow icon="T"  label="Title"      value={fields.title}     onChange={setField("title")}     type="textarea" placeholder="Event name"          loading={isLoading} />
+          <FieldRow icon="📅" label="Date"       value={fields.date}      onChange={setField("date")}      type="date"                                       loading={isLoading} />
+          <FieldRow icon="🕐" label="Start Time" value={fields.startTime} onChange={setField("startTime")} type="time"                                       loading={isLoading} />
+          <FieldRow icon="🕙" label="End Time"   value={fields.endTime}   onChange={setField("endTime")}   type="time"                                       loading={isLoading} />
+          <FieldRow icon="📍" label="Location"   value={fields.location}  onChange={setField("location")}  type="textarea" placeholder="No location detected" loading={isLoading} />
+          <div style={{ borderBottom: "none" }}>
+            <FieldRow icon="📝" label="Notes"   value={fields.notes}     onChange={setField("notes")}     type="textarea" placeholder="No notes detected"   loading={isLoading} />
+          </div>
+        </div>
+
+        {status === "error" && (
+          <div style={{ background: "#fff0f0", border: "1.5px solid #f0c0c0", borderRadius: 12, padding: "12px 16px", fontSize: 13, color: "#c0392b", marginBottom: 12, display: "flex", gap: 8 }}>
+            <span>⚠</span> {error}
+          </div>
+        )}
+
+        {status === "done" && (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+              <ToggleSwitch checked={isPrivate} onChange={setIsPrivate} label="Make it private" sub="Hidden from shared calendars" />
+              <ToggleSwitch checked={travelBuffer} onChange={setTravelBuffer} label="Add travel buffer" sub="Start time moved 30 min earlier in export" />
+            </div>
+
+            <div style={{ background: "#fff", border: "1.5px solid #ece8e0", borderRadius: 16, overflow: "hidden" }}>
+              <div style={{ padding: "12px 18px", borderBottom: "1.5px solid #ece8e0", fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "#b0aa9e" }}>
+                Export to Calendar
+              </div>
+              <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                <button onClick={downloadICS}
+                  style={{ display: "flex", alignItems: "center", gap: 14, padding: "16px 20px", background: "#d4760a", border: "none", borderRadius: 12, cursor: "pointer", fontFamily: "Syne, sans-serif", fontWeight: 700, fontSize: 14, color: "#fff", textAlign: "left", width: "100%", transition: "all 0.2s", boxShadow: "0 4px 14px rgba(212,118,10,0.25)" }}
+                  onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+                  onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0)"}>
+                  <span style={{ fontSize: 20 }}>⬇</span>
+                  <div>Download .ics file<div style={{ fontFamily: "'DM Mono', monospace", fontWeight: 300, fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 2 }}>Works with Outlook, Apple Calendar & more</div></div>
+                </button>
+                <button onClick={addToGoogle}
+                  style={{ display: "flex", alignItems: "center", gap: 14, padding: "16px 20px", background: "transparent", border: "1.5px solid #ece8e0", borderRadius: 12, cursor: "pointer", fontFamily: "Syne, sans-serif", fontWeight: 600, fontSize: 14, color: "#1a1612", textAlign: "left", width: "100%", transition: "all 0.2s" }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "#f7f4ef"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+                  <span style={{ fontSize: 20 }}>🗓</span>
+                  <div>Add to Google Calendar<div style={{ fontFamily: "'DM Mono', monospace", fontWeight: 300, fontSize: 11, color: "#b0aa9e", marginTop: 2 }}>Opens in a new tab</div></div>
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    )}
+  </div>
+</div>
+```
+
+);
+}
